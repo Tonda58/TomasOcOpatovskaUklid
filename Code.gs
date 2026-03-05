@@ -624,7 +624,7 @@ function onEdit(e) {
   const sheet = range.getSheet();
   const row = range.getRow();
   const col = range.getColumn();
-  
+
   const ss = SpreadsheetApp.getActive();
   
   // Zvláštní logika pro list "Pracovníci úklidu"
@@ -655,8 +655,28 @@ function onEdit(e) {
   
   // Ignorujeme hlavičky
   if (row < 3) return;
+
+  // 1) Kontrola jmen ve sloupcích D a G – musí být z listu "Pracovníci úklidu"
+  if (col === 4 || col === 7) {
+    const value = range.getValue();
+    if (value !== '') {
+      const workers = getWorkersList(ss);
+      const normalizedWorkers = workers.map(w => String(w).trim());
+      const normalizedValue = String(value).trim();
+      if (!normalizedWorkers.includes(normalizedValue)) {
+        range.clearContent();
+        ss.toast(
+          'Jméno musí být vybráno ze seznamu v listu "Pracovníci úklidu".',
+          'Neplatné jméno',
+          5
+        );
+      }
+    }
+    // Pro sloupce D a G už dál nic nekontrolujeme
+    return;
+  }
   
-  // Zajímá nás jen B, C, E, F
+  // 2) Kontrola časů – zajímá nás jen B, C, E, F
   if (![2, 3, 5, 6].includes(col)) return;
   
   const b = sheet.getRange(row, 2).getValue();
