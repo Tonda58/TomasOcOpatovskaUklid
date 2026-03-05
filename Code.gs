@@ -5,20 +5,22 @@
  * - Řádek s dnešním datem (pokud je v tomto měsíci) odemkne pro všechny
  */
 function updateVisibilityAndProtection(spreadsheet, sheet, month, year) {
+  // Nejprve zajistíme, že aktuální list je viditelný a aktivní,
+  // aby při skrývání ostatních listů nikdy nedošlo k situaci
+  // „Není možné skrýt všechny listy v dokumentu“.
+  sheet.showSheet();
+  sheet.activate();
+
   // Nastavení viditelnosti listů:
   // - aktuálně zpracovávaný list je viditelný
-  // - list "Pracovníci úklidu" je vždy skrytý (slouží jen jako zdroj pro dropdown)
-  // - ostatní měsíční listy jsou skryté
+  // - všechny ostatní listy (včetně "Pracovníci úklidu") jsou skryté
   const sheets = spreadsheet.getSheets();
   sheets.forEach(s => {
-    const name = s.getName();
-    if (name === sheet.getName()) {
-      s.showSheet();      // aktuální měsíc
-    } else if (name === 'Pracovníci úklidu') {
-      s.hideSheet();      // pracovníky vždy skrýt
-    } else {
-      s.hideSheet();      // ostatní měsíce skrýt
+    if (s.getSheetId() === sheet.getSheetId()) {
+      // aktuální měsíc necháme viditelný
+      return;
     }
+    s.hideSheet();
   });
 
   // Ochrana listu:
@@ -50,14 +52,29 @@ function updateVisibilityAndProtection(spreadsheet, sheet, month, year) {
     // Nastavit (nebo vynulovat) nechráněné oblasti
     protection.setUnprotectedRanges(unprotectedRanges);
 
-    // Povolit úpravy chráněné části jen vlastníkovi skriptu
+    // Povolit úpravy chráněné části vlastníkovi a adminům ze sloupce D
     const me = Session.getEffectiveUser();
-    protection.addEditor(me);
+    const adminEmails = getAdminEmails(spreadsheet);
 
-    // Odstranit všechny ostatní editory (kromě vlastníka)
+    // Sada povolených emailů (vlastník + admini)
+    const allowedEmails = new Set();
+    if (me && me.getEmail) {
+      allowedEmails.add(me.getEmail());
+    }
+    adminEmails.forEach(email => allowedEmails.add(email));
+
+    // Přidat editory
+    protection.addEditor(me);
+    if (adminEmails.length > 0) {
+      protection.addEditors(adminEmails);
+    }
+
+    // Odstranit všechny ostatní editory (kromě vlastníka a adminů)
     const editors = protection.getEditors();
     editors.forEach(editor => {
-      if (editor.getEmail && editor.getEmail() !== me.getEmail()) {
+      if (!editor.getEmail) return;
+      const email = editor.getEmail();
+      if (email && !allowedEmails.has(email)) {
         protection.removeEditor(editor);
       }
     });
@@ -66,6 +83,9 @@ function updateVisibilityAndProtection(spreadsheet, sheet, month, year) {
   } catch (error) {
     Logger.log(`⚠️ Chyba při nastavování ochrany listu: ${error}`);
   }
+
+  // Aktualizovat i ochranu listu "Pracovníci úklidu" podle aktuálního seznamu adminů
+  protectWorkersSheet(spreadsheet);
 }
 
 /**
@@ -190,6 +210,103 @@ function getWorkersList(spreadsheet) {
   } catch (error) {
     Logger.log(`⚠️ Chyba při načítání pracovníků: ${error}`);
     return [];
+  }
+}
+
+/**
+ * Načte emailové adresy adminů z listu "Pracovníci úklidu" ze sloupce D.
+ * Tito lidé mají plný přístup ke všem listům (všechna chráněná data).
+ * @param {Spreadsheet} spreadsheet
+ * @return {Array<string>} - Pole emailových adres
+ */
+function getAdminEmails(spreadsheet) {
+  try {
+    const workersSheet = spreadsheet.getSheetByName('Pracovníci úklidu');
+    if (!workersSheet) {
+      Logger.log('⚠️ Varování: List "Pracovníci úklidu" nebyl nalezen. Nebudou nastaveni žádní admini.');
+      return [];
+    }
+
+    const lastRow = workersSheet.getLastRow();
+    if (lastRow < 1) {
+      return [];
+    }
+
+    // Sloupec D = 4
+    const values = workersSheet.getRange(1, 4, lastRow, 1).getValues();
+    const emails = [];
+
+    for (let i = 0; i < values.length; i++) {
+      const value = values[i][0];
+      if (value && String(value).trim() !== '') {
+        emails.push(String(value).trim());
+      }
+    }
+
+    Logger.log(`✅ Načteno ${emails.length} admin emailů z listu "Pracovníci úklidu"`);
+    return emails;
+  } catch (error) {
+    Logger.log(`⚠️ Chyba při načítání admin emailů: ${error}`);
+    return [];
+  }
+}
+
+/**
+ * Ochrání list "Pracovníci úklidu" tak, aby ho mohli upravovat jen:
+ * - vlastník skriptu
+ * - emaily uvedené ve sloupci D (admini)
+ */
+function protectWorkersSheet(spreadsheet) {
+  try {
+    const workersSheet = spreadsheet.getSheetByName('Pracovníci úklidu');
+    if (!workersSheet) {
+      Logger.log('⚠️ List "Pracovníci úklidu" nebyl nalezen, nelze nastavit ochranu.');
+      return;
+    }
+
+    let protection;
+    const protections = workersSheet.getProtections(SpreadsheetApp.ProtectionType.SHEET);
+    if (protections && protections.length > 0) {
+      protection = protections[0];
+    } else {
+      protection = workersSheet.protect();
+    }
+    protection.setDescription('Ochrana listu Pracovníci úklidu');
+
+    // Všechno je chráněné (nemáme nechráněné oblasti)
+    protection.setUnprotectedRanges([]);
+
+    const me = Session.getEffectiveUser();
+    const adminEmails = getAdminEmails(spreadsheet);
+
+    const allowedEmails = new Set();
+    if (me && me.getEmail) {
+      allowedEmails.add(me.getEmail());
+    }
+    adminEmails.forEach(email => allowedEmails.add(email));
+
+    // Přidat editory (vlastník + admini)
+    protection.addEditor(me);
+    if (adminEmails.length > 0) {
+      protection.addEditors(adminEmails);
+    }
+
+    // Odstranit ostatní editory
+    const editors = protection.getEditors();
+    editors.forEach(editor => {
+      if (!editor.getEmail) return;
+      const email = editor.getEmail();
+      if (email && !allowedEmails.has(email)) {
+        protection.removeEditor(editor);
+      }
+    });
+
+    // List "Pracovníci úklidu" necháváme skrytý (slouží jen jako zdroj dat)
+    workersSheet.hideSheet();
+
+    Logger.log('✅ Ochrana listu "Pracovníci úklidu" byla nastavena/aktualizována.');
+  } catch (error) {
+    Logger.log(`⚠️ Chyba při nastavování ochrany listu "Pracovníci úklidu": ${error}`);
   }
 }
 
@@ -464,9 +581,43 @@ function main(monthYearStr) {
 }
 
 /**
+ * Obnoví dropdowny (sloupce D a G) ve všech měsíčních listech daty z "Pracovníci úklidu"
+ */
+function refreshWorkersDropdowns(spreadsheet) {
+  const workers = getWorkersList(spreadsheet);
+  if (workers.length === 0) return;
+  
+  const validation = SpreadsheetApp.newDataValidation()
+    .requireValueInList(workers, true)
+    .setAllowInvalid(false)
+    .build();
+  
+  const sheets = spreadsheet.getSheets();
+  const monthSheetPattern = /^\d{2}-\d{4}$/; // mm-yyyy
+  
+  sheets.forEach(s => {
+    const name = s.getName();
+    if (!monthSheetPattern.test(name)) return;
+    
+    const lastRow = s.getLastRow();
+    if (lastRow < 3) return;
+
+    // Počet datových řádků (od řádku 3 dolů)
+    const numRows = lastRow - 2;
+
+    // Dropdown má být pouze ve sloupcích D a G
+    const rangeD = s.getRange(3, 4, numRows, 1); // D3:D(lastRow)
+    const rangeG = s.getRange(3, 7, numRows, 1); // G3:G(lastRow)
+    rangeD.setDataValidation(validation);
+    rangeG.setDataValidation(validation);
+  });
+}
+
+/**
  * onEdit trigger - kontrola, že odchod není dříve než příchod
  * Platí pro všechny listy docházky (sloupce B/C a E/F, řádky od 3 níže)
  * Práce přes půlnoc není povolena.
+ * Při úpravě sloupce A v "Pracovníci úklidu" obnoví dropdowny ve všech měsíčních listech.
  */
 function onEdit(e) {
   const range = e.range;
@@ -474,9 +625,36 @@ function onEdit(e) {
   const row = range.getRow();
   const col = range.getColumn();
   
-  // Ignorujeme hlavičky a list "Pracovníci úklidu"
+  const ss = SpreadsheetApp.getActive();
+  
+  // Zvláštní logika pro list "Pracovníci úklidu"
+  if (sheet.getName() === 'Pracovníci úklidu') {
+    // Změna ve sloupci A -> obnovit dropdowny
+    if (col === 1) {
+      refreshWorkersDropdowns(ss);
+      ss.toast('Dropdowny v listech docházky byly aktualizovány.', 'Aktualizace', 3);
+    }
+    // Změna ve sloupci D -> obnovit oprávnění (admin emaily)
+    if (col === 4) {
+      const sheets = ss.getSheets();
+      const monthSheetPattern = /^\d{2}-\d{4}$/; // mm-yyyy
+      sheets.forEach(s => {
+        const name = s.getName();
+        if (!monthSheetPattern.test(name)) return;
+        const parts = name.split('-');
+        const m = parseInt(parts[0], 10);
+        const y = parseInt(parts[1], 10);
+        if (!m || !y) return;
+        updateVisibilityAndProtection(ss, s, m, y);
+      });
+      ss.toast('Oprávnění pro adminy byla aktualizována.', 'Aktualizace oprávnění', 3);
+    }
+    // Další logiku pro docházkové listy neprovádíme, takže končíme
+    return;
+  }
+  
+  // Ignorujeme hlavičky
   if (row < 3) return;
-  if (sheet.getName() === 'Pracovníci úklidu') return;
   
   // Zajímá nás jen B, C, E, F
   if (![2, 3, 5, 6].includes(col)) return;
@@ -485,8 +663,6 @@ function onEdit(e) {
   const c = sheet.getRange(row, 3).getValue();
   const eVal = sheet.getRange(row, 5).getValue();
   const f = sheet.getRange(row, 6).getValue();
-  
-  const ss = SpreadsheetApp.getActive();
   
   // Kontrola první směny (B < C) – Příchod musí být dřív než Odchod, práce přes půlnoc není povolena
   if ((col === 2 || col === 3) && b instanceof Date && c instanceof Date) {
